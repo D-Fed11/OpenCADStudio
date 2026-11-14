@@ -203,6 +203,9 @@ pub(super) const NAMES: &[&str] = &[
     "dialog_page",
     "dialog_discard",
     "dialog_cancel",
+    // Plugin dialogs (local UI-review tooling): set one control, press a button.
+    "plugin_dialog_set",
+    "plugin_dialog_button",
     "block_def_dialog",
     // The Write Block dialog's fields: `source=block|entire|objects`,
     // `block=<name>`, `object_mode=retain|convert|delete`,
@@ -5053,7 +5056,30 @@ impl OpenCADStudio {
                 })
             }
             // The open dialog's OK button.
+            "plugin_dialog_set" => {
+                let Some(state) = self.plugin_dialog_state.as_ref() else {
+                    return Err(failure("no_dialog", "No plugin dialog is open"));
+                };
+                let _ = state;
+                let id = string(req, "id")?.to_string();
+                if let Some(value) = req["bool"].as_bool() {
+                    Message::PluginDialogBoolToggle(id, value)
+                } else if let Some(index) = req["choice"].as_u64() {
+                    Message::PluginDialogChoiceSelect(id, index as usize)
+                } else {
+                    Message::PluginDialogTextChange(id, string(req, "text")?.to_string())
+                }
+            }
+            "plugin_dialog_button" => {
+                let Some(state) = self.plugin_dialog_state.as_ref() else {
+                    return Err(failure("no_dialog", "No plugin dialog is open"));
+                };
+                let id = string(req, "id")?.to_string();
+                let action = plugin_button_action(&state.def.rows, &id);
+                Message::PluginDialogButtonClick(id, action)
+            }
             "dialog_ok" => match self.active_modal {
+                Some(crate::app::ModalKind::PluginDialog) => Message::PluginDialogSubmit,
                 Some(crate::app::ModalKind::Unsaved) => Message::UnsavedDialogSave,
                 Some(crate::app::ModalKind::BlockEditChanges) => Message::BlockEditChangesSave,
                 Some(crate::app::ModalKind::WriteBlock) => Message::WblockApply,
@@ -5129,6 +5155,7 @@ impl OpenCADStudio {
                 Message::CloseModal
             }
             "dialog_discard" | "dialog_cancel" => match self.active_modal {
+                Some(crate::app::ModalKind::PluginDialog) => Message::PluginDialogCancel,
                 Some(crate::app::ModalKind::Unsaved) => {
                     if name == "dialog_discard" {
                         Message::UnsavedDialogDiscard
@@ -5259,4 +5286,37 @@ impl OpenCADStudio {
         (self.ctrl_down, self.shift_down) = modifiers;
         Ok(task)
     }
+}
+
+
+/// The `action` of the plugin dialog button `id`, searched through nested rows/columns.
+fn plugin_button_action(
+    rows: &[ocs_plugin_api::dialog::DialogRow],
+    id: &str,
+) -> Option<String> {
+    fn find(
+        controls: &[ocs_plugin_api::dialog::DialogControl],
+        id: &str,
+    ) -> Option<Option<String>> {
+        use ocs_plugin_api::dialog::DialogControl;
+        for control in controls {
+            match control {
+                DialogControl::Button {
+                    id: button, action, ..
+                } if button == id => return Some(action.clone()),
+                DialogControl::Row { controls, .. }
+                | DialogControl::Column { controls, .. }
+                | DialogControl::Fields { controls, .. } => {
+                    if let Some(found) = find(controls, id) {
+                        return Some(found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    rows.iter()
+        .find_map(|row| find(&row.controls, id))
+        .flatten()
 }
